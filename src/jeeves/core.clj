@@ -7,6 +7,11 @@
 
 (defmulti policy "" identity)
 
+(defmethod policy :default [field]
+  (reify Policy
+    (level [this ctx viewer] ::low)
+    (scrub [this value level] ::scrubbed)))
+
 (defprotocol Revealing
   (reveal [this viewer]))
 
