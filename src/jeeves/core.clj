@@ -1,60 +1,115 @@
 (ns jeeves.core
-  (:require [clojure.algo.generic.functor :refer [fmap]]))
+  (:require [clojure.algo.generic.functor :refer [fmap]])
+  (:import clojure.lang.Associative))
+
+(def high 1)
+(def low 0)
 
 (defprotocol Policy
-  (level [this ctx viewer])
-  (scrub [this value level]))
-
-(defmulti policy "" identity)
-
-(defmethod policy :default [field]
-  (reify Policy
-    (level [this ctx viewer] ::low)
-    (scrub [this value level] ::scrubbed)))
+  (level [this ctx viewer] "")
+  (scrub [this value level] ""))
 
 (defprotocol Revealing
+  ""
   (reveal [this viewer]))
 
-(deftype SensitiveValue [ctx field value]
+(declare unveil)
+
+(defrecord Sensitive [ctx policy value]
   Revealing
   (reveal [this viewer]
-    (let [p (policy field)
-          l (level p ctx viewer)
-          s (scrub p value l)]
-      s))
+    (->> (unveil viewer)
+         (level policy ctx)
+         (scrub policy value)))
   Object
-  (toString [this] (pr-str {field ::scrubbed})))
+  (toString [this] (pr-str ::scrubbed)))
 
-(declare sensitive)
+(defn unveil [v]
+  (cond
+    (instance? Sensitive v)
+    (:value v)
 
-(deftype SensitiveMap [m]
-  Revealing
-  (reveal [this viewer] (fmap #(reveal % viewer) m))
+    (map? v)
+    (fmap unveil v)
 
-  clojure.lang.Associative
-  (containsKey [this key] (contains? m key))
-  (entryAt [this key] (get m key))
-  (assoc [this key val] (SensitiveMap. (assoc m key (sensitive m key val))))
+    :default
+    v))
 
-  clojure.lang.ILookup
-  (valAt [this k] (get m k))
-  (valAt [this k d] (get m k d))
+(defmulti tagged-level "" (fn [tag ctx viewer] tag))
 
-  clojure.lang.IFn
-  (invoke [this kw] (get m kw))
+(defmethod tagged-level :default
+  [tag ctx viewer]
+  high)
 
-  clojure.lang.Seqable
-  (seq [this] (seq m))
+(defmulti tagged-scrub "" (fn [tag value level] tag))
 
-  Object
-  (toString [this] (pr-str m)))
+(defmethod tagged-scrub :default
+  [tag value level]
+  (if (< level high)
+    ::scrubbed
+    value))
+
+(defrecord TaggedPolicy [tag]
+  Policy
+  (level [this ctx viewer]
+    (tagged-level tag ctx viewer))
+  (scrub [this value level]
+    (tagged-scrub tag value level)))
+
+(defn tagged-policy
+  ""
+  [tag]
+  (TaggedPolicy. tag))
 
 (defn sensitive
   ([ctx]
-   (SensitiveMap.
-    (into {} (for [[field value] ctx]
-               [field (sensitive ctx field value)]))))
-  ([ctx field value]
-   (if (map? value)
-     (SensitiveMap. value)
-     (SensitiveValue. ctx field value))))
+   (sensitive ctx ctx))
+  ([value ctx]
+   (into {} (for [[k v] value]
+              [k (if (map? v)
+                   (sensitive v ctx)
+                   (Sensitive. ctx (tagged-policy k) v))]))))
+
+(extend-type Associative
+  Revealing
+  (reveal [ctx viewer]
+    (fmap #(reveal % viewer) ctx)))
+
+(defrecord CompositePolicy [values]
+
+  Policy
+  (level [this ctx viewer]
+    (let [levels (for [{:keys [policy ctx]} values] (level policy ctx viewer))]
+      (apply min levels)))
+  (scrub [this value level]
+    (if (= high level)
+      value
+      ::scrubbed)))
+
+(defn calc
+  ""
+  [f & params]
+  (let [unveiled (map :value params)
+        result (apply f unveiled)]
+    (Sensitive. {} (CompositePolicy. params) result)))
+
+(defn sensitive-fn
+  ""
+  [f]
+  (fn [& params] (apply calc f params)))
+
+(defmacro defpolicy
+  ""
+  ([tag [level [ctx viewer] & body]]
+   `(defmethod jeeves.core/tagged-level ~tag
+      [_# ~ctx ~viewer]
+      ~@body))
+  ([tag
+   [level [ctx viewer] & level-body]
+   [scrub [value lvl] & scrub-body]]
+   `(do (defmethod jeeves.core/tagged-level ~tag
+          [_# ~ctx ~viewer]
+          ~@level-body)
+        (defmethod jeeves.core/tagged-scrub ~tag
+          [_# ~value ~lvl]
+          ~@scrub-body))))
