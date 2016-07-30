@@ -1,5 +1,6 @@
 (ns jeeves.core
-  (:require [clojure.algo.generic.functor :refer [fmap]])
+  (:require [clojure.algo.generic.functor :refer [fmap]]
+            [jeeves.core :as jeeves])
   (:import clojure.lang.Associative))
 
 (def high 1)
@@ -15,7 +16,7 @@
 
 (declare unveil)
 
-(defrecord Sensitive [ctx policy value]
+(deftype Sensitive [ctx policy value]
   Revealing
   (reveal [this viewer]
     (->> (unveil viewer)
@@ -27,13 +28,16 @@
 (defn unveil [v]
   (cond
     (instance? Sensitive v)
-    (:value v)
+    (.value v)
 
     (map? v)
     (fmap unveil v)
 
     :default
     v))
+
+(defmethod print-method Sensitive [v ^java.io.Writer w]
+  (.write w "<<-scrubbed->>"))
 
 (defmulti tagged-level "" (fn [tag ctx viewer] tag))
 
@@ -75,11 +79,10 @@
   (reveal [ctx viewer]
     (fmap #(reveal % viewer) ctx)))
 
-(defrecord CompositePolicy [values]
-
+(deftype CompositePolicy [values]
   Policy
   (level [this ctx viewer]
-    (let [levels (for [{:keys [policy ctx]} values] (level policy ctx viewer))]
+    (let [levels (for [v values] (level (.policy v) (.ctx v) viewer))]
       (apply min levels)))
   (scrub [this value level]
     (if (= high level)
@@ -89,7 +92,7 @@
 (defn calc
   ""
   [f & params]
-  (let [unveiled (map :value params)
+  (let [unveiled (map #(.value %) params)
         result (apply f unveiled)]
     (Sensitive. {} (CompositePolicy. params) result)))
 
@@ -97,6 +100,19 @@
   ""
   [f]
   (fn [& params] (apply calc f params)))
+
+(defn sens [ctx policy v]
+  (Sensitive. ctx policy v))
+
+(defn composite-policy [vs]
+  (CompositePolicy. vs))
+
+(defmacro let-sensitive
+  ""
+  [let-clauses & body]
+  `(let ~(vec (mapcat (fn [[k v]] [k `(.value ~v)]) (partition 2 let-clauses)))
+     (let [result# (do ~@body)]
+       (jeeves.core/sens {} (jeeves/composite-policy ~(vec (map second (partition 2 let-clauses)))) result#))))
 
 (defmacro defpolicy
   ""
